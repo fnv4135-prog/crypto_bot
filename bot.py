@@ -51,6 +51,52 @@ async def get_price(symbol: str) -> float | None:
     return None
 
 
+async def get_24h_stats(symbol: str) -> dict | None:
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200:
+                data = await r.json()
+                return {
+                    "price": float(data["lastPrice"]),
+                    "change_pct": float(data["priceChangePercent"]),
+                    "high": float(data["highPrice"]),
+                    "low": float(data["lowPrice"]),
+                    "volume": float(data["quoteVolume"]),
+                }
+    return None
+
+
+async def get_klines(symbol: str, interval: str = "1h", limit: int = 12) -> list | None:
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status == 200:
+                data = await r.json()
+                return [float(k[4]) for k in data]  # close prices
+    return None
+
+
+def build_ascii_chart(prices: list, width: int = 12) -> str:
+    if not prices:
+        return "нет данных"
+    mn, mx = min(prices), max(prices)
+    if mx == mn:
+        return "─" * width
+    rows = 5
+    chart_lines = []
+    for row in range(rows, 0, -1):
+        threshold = mn + (mx - mn) * (row / rows)
+        line = ""
+        for p in prices:
+            if p >= threshold:
+                line += "█"
+            else:
+                line += "░"
+        chart_lines.append(line)
+    return "\n".join(chart_lines)
+
+
 def coins_keyboard():
     builder = InlineKeyboardBuilder()
     for coin in COINS:
@@ -77,21 +123,54 @@ async def cmd_start(message: Message):
         "/alert — создать новый алерт\n"
         "/list — мои алерты\n"
         "/clear — удалить все алерты\n"
-        "/prices — текущие цены"
+        "/prices — цены + изменение за 24ч\n"
+        "/chart BTC — график последних 12 часов"
     )
     await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Command("prices"))
 async def cmd_prices(message: Message):
-    lines = ["💹 <b>Текущие цены:</b>\n"]
+    lines = ["💹 <b>Рынок сейчас:</b>\n"]
     for coin, symbol in COINS.items():
-        price = await get_price(symbol)
-        if price:
-            lines.append(f"<b>{coin}</b>: ${price:,.2f}")
+        stats = await get_24h_stats(symbol)
+        if stats:
+            arrow = "📈" if stats["change_pct"] >= 0 else "📉"
+            sign = "+" if stats["change_pct"] >= 0 else ""
+            lines.append(
+                f"{arrow} <b>{coin}</b>: ${stats['price']:,.2f}  "
+                f"<code>{sign}{stats['change_pct']:.2f}%</code> за 24ч\n"
+                f"   H: ${stats['high']:,.2f}  L: ${stats['low']:,.2f}"
+            )
         else:
             lines.append(f"<b>{coin}</b>: —")
+    lines.append("\n/chart BTC — график последних 12ч")
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(Command("chart"))
+async def cmd_chart(message: Message):
+    args = message.text.split()
+    coin = args[1].upper() if len(args) > 1 else "BTC"
+    if coin not in COINS:
+        await message.answer(f"Неизвестная монета. Доступны: {', '.join(COINS.keys())}")
+        return
+    prices = await get_klines(COINS[coin], interval="1h", limit=12)
+    if not prices:
+        await message.answer("Не удалось получить данные.")
+        return
+    chart = build_ascii_chart(prices)
+    change = ((prices[-1] - prices[0]) / prices[0]) * 100
+    sign = "+" if change >= 0 else ""
+    arrow = "📈" if change >= 0 else "📉"
+    await message.answer(
+        f"{arrow} <b>{coin} / 12 часов</b>\n\n"
+        f"<code>{chart}</code>\n\n"
+        f"Старт: <b>${prices[0]:,.2f}</b>\n"
+        f"Сейчас: <b>${prices[-1]:,.2f}</b>\n"
+        f"Изменение: <b>{sign}{change:.2f}%</b>",
+        parse_mode="HTML"
+    )
 
 
 @dp.message(Command("alert"))
